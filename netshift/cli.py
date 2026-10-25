@@ -131,7 +131,8 @@ def cmd_block(args: argparse.Namespace) -> None:
     if not args.yes:
         _confirm(net, targets)
 
-    poisoner = Poisoner(net, mode=args.mode, interval=args.interval)
+    poisoner = Poisoner(net, mode=args.mode, interval=args.interval,
+                        ipv6=not args.no_ipv6)
     for ip, mac in targets:
         poisoner.add(ip, mac)
     _install_signal_handlers(poisoner)
@@ -180,6 +181,8 @@ def cmd_status(args: argparse.Namespace) -> None:
             alive = True
 
     print(f"Interface : {data.get('iface')}   gateway {data.get('gateway')}   mode {data.get('mode')}")
+    if data.get("ipv6"):
+        print(f"IPv6      : {data.get('router_ip6') or 'no router advertisement found'}")
     state = "running" if alive else "not running (stale state file)"
     print(f"Process   : {state}" + (f"   pid {pid}" if pid else ""))
     targets = data.get("targets", [])
@@ -260,7 +263,8 @@ def cmd_tui(args: argparse.Namespace) -> None:
     from .tui import run_tui
 
     net = lookup(args.iface, args.gateway)
-    run_tui(net, mode=args.mode, interval=args.interval, scan_timeout=args.timeout)
+    run_tui(net, mode=args.mode, interval=args.interval, scan_timeout=args.timeout,
+            ipv6=not args.no_ipv6)
 
 
 def cmd_oui(args: argparse.Namespace) -> None:
@@ -296,6 +300,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--mac", nargs="+", help="target MAC addresses (same order as the IPs)")
         p.add_argument("--duration", type=_duration, help="restore automatically after: 90s, 15m, 1h")
         p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+        p.add_argument("--no-ipv6", action="store_true",
+                       help="do not poison IPv6 neighbour discovery")
 
     p_block = sub.add_parser("block", parents=[common], help="cut internet for the given devices")
     add_cut_args(p_block)
@@ -325,6 +331,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tui = sub.add_parser("tui", parents=[common], help="interactive device list")
     p_tui.add_argument("--mode", choices=("block", "mitm"), default="block")
+    p_tui.add_argument("--no-ipv6", action="store_true",
+                       help="do not poison IPv6 neighbour discovery")
     p_tui.set_defaults(func=cmd_tui)
 
     p_oui = sub.add_parser("oui-update", help="download the IEEE vendor database")

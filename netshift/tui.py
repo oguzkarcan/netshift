@@ -126,12 +126,13 @@ class Scanner:
 
 class App:
     def __init__(self, net: NetInfo, mode: str = "block", interval: float = 1.5,
-                 scan_timeout: float = 1.5) -> None:
+                 scan_timeout: float = 1.5, ipv6: bool = True) -> None:
         self.net = net
         self.mode = mode
         self.interval = interval
+        self.ipv6 = ipv6
         self.scanner = Scanner(net, scan_timeout)
-        self.poisoner = Poisoner(net, mode=mode, interval=interval)
+        self.poisoner = Poisoner(net, mode=mode, interval=interval, ipv6=ipv6)
         self.cursor = 0
         self.selected: set[str] = set()
         self.cut_since: dict[str, float] = {}
@@ -288,7 +289,7 @@ class App:
             self.notify("Restore first (r) before switching mode.", 4)
             return
         self.mode = "mitm" if self.mode == "block" else "block"
-        self.poisoner = Poisoner(self.net, mode=self.mode, interval=self.interval)
+        self.poisoner = Poisoner(self.net, mode=self.mode, interval=self.interval, ipv6=self.ipv6)
         detail = ("traffic is relayed through this machine" if self.mode == "mitm"
                   else "devices stay on Wi-Fi and lose the internet")
         self.notify(f"Mode: {self.mode} — {detail}", 5)
@@ -337,6 +338,8 @@ class App:
         self.hline(win, 0, width, G["tl"], G["tr"], "netshift", self.mode, border)
         info = (f" {self.net.iface}  {self.net.ip}/{self.net.netmask}"
                 f"   gw {self.net.gateway}")
+        if self.poisoner.router_ip6:
+            info += f"   v6 {self.poisoner.router_ip6}"
         self.put(win, 1, 0, G["v"], border)
         self.put(win, 1, 1, info, pal["dim"], width - 2)
         count = f"{len(self.devices)} devices "
@@ -431,6 +434,12 @@ class App:
             return "this machine"
         return "up"
 
+    def ipv6_text(self, dev: scan.Device) -> str:
+        target = self.poisoner.targets.get(dev.ip)
+        if target is None:
+            return "-"
+        return target.ip6 or "not found"
+
     def timer_text(self, dev: scan.Device) -> str:
         target = self.poisoner.targets.get(dev.ip)
         if target is None:
@@ -476,6 +485,7 @@ class App:
             ("Vendor", dev.vendor or "-"),
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
             ("Timer", self.timer_text(dev)),
+            ("IPv6", self.ipv6_text(dev)),
             ("Selected", "yes" if dev.ip in self.selected else "no"),
         ]
         for offset, (label, value) in enumerate(lines, start=2):
@@ -543,6 +553,7 @@ class App:
             ("Vendor", dev.vendor or "-"),
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
             ("Timer", self.timer_text(dev)),
+            ("IPv6", self.ipv6_text(dev)),
             ("Gateway", "yes" if dev.is_gateway else "no"),
             ("This machine", "yes" if dev.is_self else "no"),
         ]
@@ -770,5 +781,5 @@ class App:
 
 
 def run_tui(net: NetInfo, mode: str = "block", interval: float = 1.5,
-            scan_timeout: float = 1.5) -> None:
-    App(net, mode=mode, interval=interval, scan_timeout=scan_timeout).run()
+            scan_timeout: float = 1.5, ipv6: bool = True) -> None:
+    App(net, mode=mode, interval=interval, scan_timeout=scan_timeout, ipv6=ipv6).run()

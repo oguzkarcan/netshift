@@ -51,6 +51,15 @@ machine, so you never take a man-in-the-middle position and `ip_forward` stays o
 `ip_forward` and actually relays the traffic through this machine, so you can show *why*
 ARP spoofing is dangerous while packets keep flowing.
 
+### IPv6
+
+Modern networks also hand out IPv6 with router advertisements, and a poisoned ARP entry
+does nothing for it. The IPv6 counterpart of ARP is NDP, and it is just as
+unauthenticated: a Neighbor Advertisement can claim that the router's link-local address
+lives at any MAC. `netshift` sends those advertisements **unicast to each target only** —
+never to the whole LAN — and answers every Neighbor Solicitation the target sends, so the
+forged entry does not lose the race against the real router. `--no-ipv6` turns it off.
+
 ## Install
 
 Linux (Arch/Omarchy):
@@ -190,6 +199,8 @@ netshift heal
 netshift oui-update
 ```
 
+Add `--no-ipv6` to `block`, `mitm` or `tui` to skip NDP poisoning and touch ARP only.
+
 When `--duration` elapses the ARP entries are restored automatically. `Ctrl+C`, `SIGTERM`
 and a normal quit all perform the same cleanup; after a `kill -9`, run `netshift heal`.
 
@@ -210,9 +221,13 @@ and a normal quit all perform the same cleanup; after a `kill -9`, run `netshift
 
 ## Limits (the honest list)
 
-- **IPv6**: the tool works on IPv4 ARP. If the network hands out IPv6, the device may keep
-  reaching the internet over it; `block` will look broken. Disable IPv6 for the demo or
-  handle router advertisements separately.
+- **IPv6 privacy addresses**: NDP poisoning targets the address the device uses as its
+  next hop, usually the router's link-local. If the target's own address is missing from
+  the neighbour table, `netshift` falls back to the MAC-derived EUI-64 form; a device
+  using a random link-local address may keep IPv6 connectivity. `--no-ipv6` avoids the
+  extra traffic.
+- **IPv6 relay**: `mitm` relays IPv4 through this machine. IPv6 is cut instead of being
+  relayed, which is usually what you want: apps fall back to IPv4 and stay observable.
 - **Client isolation** (typical on café and corporate guest Wi-Fi) hides devices from each
   other at layer 2; the tool will not work there — and it should not.
 - Devices with a **static ARP entry** ignore the poisoning.

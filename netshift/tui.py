@@ -110,10 +110,11 @@ class Scanner:
         try:
             devices = scan.arp_scan(self.net.cidr, self.net.iface, timeout=self.timeout)
             scan.annotate(devices, self.net.gateway, self.net.ip)
-            if names:
-                scan.add_hostnames(devices, timeout=1.5)
             self.devices = devices
             self.error = ""
+            self._revision += 1          # show the list before names arrive
+            if names:
+                scan.add_hostnames(devices, self.net.ip, timeout=1.6)
         except Exception as exc:  # permission, no route, ...
             self.error = str(exc) or exc.__class__.__name__
         finally:
@@ -122,7 +123,7 @@ class Scanner:
 
 class App:
     def __init__(self, net: NetInfo, mode: str = "block", interval: float = 1.5,
-                 scan_timeout: float = 3.0) -> None:
+                 scan_timeout: float = 1.5) -> None:
         self.net = net
         self.mode = mode
         self.interval = interval
@@ -322,7 +323,7 @@ class App:
                 host = (dev.hostname or "-")[:18]
                 body = f"{mark}{box} {index + 1:>2}  {host:<19}{dev.ip:<16}{dev.mac:<18}{vendor:<20}"
             elif medium:
-                host = (dev.hostname or "-")[:18]
+                host = (dev.hostname or dev.vendor or "-")[:18]
                 body = f"{mark}{box} {index + 1:>2}  {host:<20}{dev.ip:<16}"
             else:
                 body = f"{mark}{box} {index + 1:>2}  {dev.ip:<16}"
@@ -385,7 +386,7 @@ class App:
 
         label_w = 10
         lines = [
-            ("Host", dev.hostname or "-"),
+            ("Host", dev.hostname or "(unknown)"),
             ("IP", dev.ip),
             ("MAC", dev.mac),
             ("Vendor", dev.vendor or "-"),
@@ -447,7 +448,7 @@ class App:
             self.screen = "main"
             return
         rows = [
-            ("Host", dev.hostname or "-"),
+            ("Host", dev.hostname or "(unknown)"),
             ("IP", dev.ip),
             ("MAC", dev.mac),
             ("Vendor", dev.vendor or "-"),
@@ -564,5 +565,5 @@ class App:
 
 
 def run_tui(net: NetInfo, mode: str = "block", interval: float = 1.5,
-            scan_timeout: float = 3.0) -> None:
+            scan_timeout: float = 1.5) -> None:
     App(net, mode=mode, interval=interval, scan_timeout=scan_timeout).run()

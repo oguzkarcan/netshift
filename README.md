@@ -106,7 +106,8 @@ The interface is entirely keyboard driven — no commands to type:
 | `?` | help screen |
 | `q` | quit (restores everything on the way out) |
 
-Scans run in a background thread, so the cursor never freezes. On terminals 110+ columns
+Scans run in a background thread, so the cursor never freezes; the table appears as soon
+as the ARP sweep finishes and hostnames fill in a moment later. On terminals 110+ columns
 wide a details panel for the focused device appears on the right; below 80 columns the
 table drops columns and stays readable down to roughly 60×18.
 
@@ -115,6 +116,27 @@ Vendor names come from a one-off download:
 ```bash
 sudo ./run.sh oui-update           # IEEE OUI registry → ~/.cache/netshift/oui.csv
 ```
+
+### Hostnames are best-effort
+
+There is no single place on a LAN that knows what every device is called, so `netshift`
+asks several sources and keeps the first answer:
+
+| Source | Catches |
+| --- | --- |
+| system resolver (PTR) | router DNS, `/etc/hosts`, mDNS on macOS |
+| direct mDNS PTR query | Apple gear, avahi/Bonjour hosts, modern Android |
+| `avahi-resolve` | devices that only answer unicast mDNS (used when avahi runs) |
+| NBNS node status | Windows and Samba machines |
+| SSDP/UPnP `friendlyName` | TVs, printers, NAS boxes |
+
+The union is what makes names appear: on a typical home LAN the router publishes no PTR
+records at all, and the devices themselves are the only ones who know their names.
+
+Resolved names are cached per MAC in `~/.cache/netshift/hosts.json`, so they survive DHCP
+address changes and show up instantly on later scans. A device that answers none of the
+sources stays unnamed — the table then falls back to the vendor name. `scan --no-names`
+skips resolution entirely when you only want IPs and MACs.
 
 ## Commands
 

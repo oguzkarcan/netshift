@@ -98,7 +98,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
     devices = scan.arp_scan(net.cidr, net.iface, timeout=args.timeout)
     scan.annotate(devices, net.gateway, net.ip)
     if not args.no_names:
-        scan.add_hostnames(devices)
+        scan.add_hostnames(devices, net.ip)
 
     if not devices:
         print("No devices found.")
@@ -188,13 +188,13 @@ def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--iface", help="network interface (default: the outgoing one)")
     common.add_argument("--gateway", help="gateway IP (default: from the routing table)")
-    common.add_argument("--timeout", type=float, default=3.0, help="ARP scan timeout in seconds")
+    common.add_argument("--timeout", type=float, default=1.5, help="ARP scan timeout in seconds")
     common.add_argument("--interval", type=float, default=1.5, help="poison interval in seconds")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_scan = sub.add_parser("scan", parents=[common], help="list the devices on the network")
-    p_scan.add_argument("--no-names", action="store_true", help="skip reverse DNS lookups")
+    p_scan.add_argument("--no-names", action="store_true", help="skip hostname resolution")
     p_scan.set_defaults(func=cmd_scan)
 
     def add_cut_args(p: argparse.ArgumentParser) -> None:

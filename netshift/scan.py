@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import socket
-from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 
 from scapy.all import ARP, Ether, srp
@@ -35,22 +33,11 @@ def arp_scan(cidr: str, iface: str, timeout: float = 3.0) -> list[Device]:
     return devices
 
 
-def _reverse_lookup(ip: str) -> str:
-    try:
-        return socket.gethostbyaddr(ip)[0]
-    except Exception:
-        return ""
+def add_hostnames(devices: list[Device], iface_ip: str, timeout: float = 1.4) -> None:
+    """Fill in hostnames using every resolver available (see names.py)."""
+    from .names import resolve
 
-
-def add_hostnames(devices: list[Device], timeout: float = 2.0) -> None:
-    """Fill in hostnames with a bounded wait so scanning stays snappy."""
-    if not devices:
-        return
-    with ThreadPoolExecutor(max_workers=min(32, len(devices))) as pool:
-        futures = {pool.submit(_reverse_lookup, d.ip): d for d in devices}
-        done, _ = wait(futures, timeout=timeout)
-        for future in done:
-            futures[future].hostname = future.result() or ""
+    resolve(devices, iface_ip, mtimeout=timeout)
 
 
 def annotate(devices: list[Device], gateway: str, my_ip: str) -> None:

@@ -60,6 +60,17 @@ lives at any MAC. `netshift` sends those advertisements **unicast to each target
 never to the whole LAN — and answers every Neighbor Solicitation the target sends, so the
 forged entry does not lose the race against the real router. `--no-ipv6` turns it off.
 
+### Traffic and DNS, live
+
+In `mitm` mode every frame passes through this machine, so the interface can show what it
+is doing. Press `d` for recent DNS questions — device, name, age — and the details panel
+carries a bytes/s figure plus a 20-second sparkline for the focused device. `c` in the DNS
+screen clears the list; the counters live in memory only.
+
+That is also the honest part of the demo: DNS is plain text, so the list appears without
+breaking TLS. DoH/DoT moves that metadata inside HTTPS and the list goes quiet, while the
+sparkline still shows that something is being said.
+
 ## Install
 
 Linux (Arch/Omarchy):
@@ -114,6 +125,7 @@ The interface is entirely keyboard driven — no commands to type:
 | `n` | rename the focused device (stored per MAC) |
 | `t` | auto-restore timer: off / 1 / 5 / 15 / 30 / 60 min |
 | `w` | wake the focused device (Wake-on-LAN) |
+| `d` | recent DNS queries (`mitm` mode) |
 | `r` | restore every cut device |
 | `s` | rescan (also every 20 s in the background) |
 | `m` | switch mode: `block` ↔ `mitm` |
@@ -228,6 +240,8 @@ and a normal quit all perform the same cleanup; after a `kill -9`, run `netshift
   extra traffic.
 - **IPv6 relay**: `mitm` relays IPv4 through this machine. IPv6 is cut instead of being
   relayed, which is usually what you want: apps fall back to IPv4 and stay observable.
+- **DNS visibility** needs `mitm`: on a switched LAN another host's frames never reach
+  this NIC in `block` mode. DoH/DoT hides the names in either mode; the byte counts stay.
 - **Client isolation** (typical on café and corporate guest Wi-Fi) hides devices from each
   other at layer 2; the tool will not work there — and it should not.
 - Devices with a **static ARP entry** ignore the poisoning.

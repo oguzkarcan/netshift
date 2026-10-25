@@ -13,7 +13,7 @@ import signal
 import threading
 import time
 
-from . import aliases, notify, scan, wol
+from . import aliases, notify, scan, traffic, wol
 from .netif import NetInfo
 from .poison import Poisoner
 
@@ -29,6 +29,17 @@ G = (
 )
 
 SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏" if _UNICODE else "|/-\\"
+SPARK = "▁▂▃▄▅▆▇█" if _UNICODE else ".:-=+*#"
+
+
+def sparkline(values: list[int]) -> str:
+    if not values:
+        return ""
+    top = max(values)
+    if top <= 0:
+        return SPARK[0] * len(values)
+    scale = len(SPARK) - 1
+    return "".join(SPARK[min(scale, int(value / top * scale))] for value in values)
 
 HELP_LINES = [
     ("", ""),
@@ -38,6 +49,7 @@ HELP_LINES = [
     ("  n", "rename the focused device"),
     ("  t", "auto-restore timer (off/1/5/15/30/60 min)"),
     ("  w", "wake the focused device (Wake-on-LAN)"),
+    ("  d", "recent DNS queries (meaningful in mitm mode)"),
     ("  r", "restore every cut device"),
     ("  s", "rescan the network"),
     ("  m", "switch mode: block ↔ mitm"),
@@ -133,10 +145,11 @@ class App:
         self.ipv6 = ipv6
         self.scanner = Scanner(net, scan_timeout)
         self.poisoner = Poisoner(net, mode=mode, interval=interval, ipv6=ipv6)
+        self.monitor = traffic.Monitor(net.iface)
         self.cursor = 0
         self.selected: set[str] = set()
         self.cut_since: dict[str, float] = {}
-        self.screen = "main"          # main | confirm | help | details | timer
+        self.screen = "main"          # main | confirm | help | details | timer | dns
         self.timer_seconds = 0        # default for the next cut; 0 = no timer
         self.toast = ""
         self.toast_until = 0.0
@@ -460,7 +473,7 @@ class App:
             text = " " + self.toast
             attr = pal["accent"] | curses.A_BOLD
         else:
-            text = " space select · b cut · n name · t timer · r restore · s rescan · ? help · q quit "
+            text = " space select · b cut · n name · t timer · d dns · r restore · s rescan · ? help · q quit "
             attr = pal["dim"]
         self.put(win, height - 2, 1, text, attr, width - 2)
 
@@ -486,6 +499,8 @@ class App:
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
             ("Timer", self.timer_text(dev)),
             ("IPv6", self.ipv6_text(dev)),
+            ("Traffic", traffic.human_rate(self.monitor.rate(dev.ip))),
+            ("Graph", sparkline(self.monitor.series(dev.ip, 18))),
             ("Selected", "yes" if dev.ip in self.selected else "no"),
         ]
         for offset, (label, value) in enumerate(lines, start=2):
@@ -554,11 +569,35 @@ class App:
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
             ("Timer", self.timer_text(dev)),
             ("IPv6", self.ipv6_text(dev)),
+            ("Traffic", traffic.human_rate(self.monitor.rate(dev.ip))),
+            ("DNS", f"{self.monitor.query_count(dev.ip)} queries"),
             ("Gateway", "yes" if dev.is_gateway else "no"),
             ("This machine", "yes" if dev.is_self else "no"),
         ]
         lines = [(f"  {label:<14}{value}", pal["text"]) for label, value in rows]
         self.draw_modal(win, pal, "device details", lines, "[Esc] close", width=62)
+
+    def draw_dns(self, win: curses.window, pal: Palette) -> None:
+        height, _cols = win.getmaxyx()
+        limit = max(4, min(16, height - 10))
+        entries = self.monitor.recent(limit)
+        lines: list[tuple[str, int]] = []
+        if not self.monitor.active:
+            lines.append(("  Packet capture is not running.", pal["accent"]))
+            lines.append((f"  {self.monitor.error[:58]}", pal["dim"]))
+        elif not entries:
+            lines.append(("  Nothing yet. DNS is visible when traffic passes this", pal["dim"]))
+            lines.append(("  machine, i.e. in mitm mode.", pal["dim"]))
+        if entries:
+            lines.append(("  DEVICE           DOMAIN                              AGE", pal["dim"]))
+        for when, source, name in entries:
+            dev = next((d for d in self.devices if d.ip == source), None)
+            who = (dev.alias or dev.hostname or source) if dev else source
+            ago = max(0, int(time.time() - when))
+            lines.append((f"  {who[:16]:<17}{name[:36]:<37}{ago:>3}s", pal["text"]))
+        lines.append(("", 0))
+        lines.append(("  DNS is unencrypted here; DoH/DoT hides this list.", pal["dim"]))
+        self.draw_modal(win, pal, "dns activity", lines, "[Esc] close · [c] clear", width=74)
 
     # -- rename and timers -------------------------------------------------
     def prompt_alias(self, win: curses.window, pal: Palette, dev: scan.Device) -> str | None:
@@ -679,6 +718,8 @@ class App:
             self.draw_details_modal(win, pal)
         elif self.screen == "timer":
             self.draw_timer(win, pal)
+        elif self.screen == "dns":
+            self.draw_dns(win, pal)
         win.refresh()
 
     def handle(self, key: int, win: curses.window | None = None) -> None:
@@ -690,6 +731,12 @@ class App:
             return
         if self.screen == "timer":
             self.timer_choice(key)
+            return
+        if self.screen == "dns":
+            if key == ord("c"):
+                self.monitor.clear()
+            elif key in (27, ord("q"), ord("d"), 10, 13, curses.KEY_ENTER):
+                self.screen = "main"
             return
         if self.screen in ("help", "details"):
             if key in (27, ord("q"), ord("?"), 10, 13, curses.KEY_ENTER):
@@ -710,6 +757,8 @@ class App:
             self.screen = "timer"
         elif key == ord("w"):
             self.wake_focused()
+        elif key == ord("d"):
+            self.screen = "dns"
         elif key == ord("r"):
             self.restore_all()
         elif key == ord("s"):
@@ -742,12 +791,14 @@ class App:
             except (ValueError, OSError):
                 pass
 
+        self.monitor.start()
         self.scanner.start()
         last_scan = time.time()
         last_timer_check = 0.0
 
         while self.running:
             self.sync_scan()
+            self.monitor.tick()
             if time.time() - last_timer_check > 0.5:
                 self.expire_timers()
                 last_timer_check = time.time()
@@ -777,6 +828,7 @@ class App:
         try:
             curses.wrapper(self._main)
         finally:
+            self.monitor.stop()
             self.poisoner.stop()
 
 

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netshift"
+version = "0.1.0"
+description = "Cut a device's internet while it stays on Wi-Fi - ARP demo for authorized labs"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = ["scapy>=2.5"]
+keywords = ["arp", "arp-spoofing", "network", "tui", "security", "education"]
+
+[project.scripts]
+netshift = "netshift.cli:main"
+
+[tool.setuptools]
+packages = ["netshift"]

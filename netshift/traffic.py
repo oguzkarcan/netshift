@@ -29,6 +29,7 @@ class Monitor:
         self._lock = threading.Lock()
         self._counts: dict[str, int] = {}
         self._history: dict[str, deque[int]] = {}
+        self._watched: set[str] = set()
         self._queries: deque[tuple[float, str, str]] = deque(maxlen=QUERY_LIMIT)
         self._bucket = time.time()
 
@@ -72,14 +73,16 @@ class Monitor:
             size = len(packet)
             with self._lock:
                 for host in (address.src, address.dst):
+                    if self._watched and host not in self._watched:
+                        continue
                     self._counts[host] = self._counts.get(host, 0) + size
 
             if UDP in packet and 53 in (packet[UDP].sport, packet[UDP].dport):
-                self._observe_dns(packet)
+                self._observe_dns(packet, address.src)
         except Exception:
             pass
 
-    def _observe_dns(self, packet) -> None:
+    def _observe_dns(self, packet, source: str) -> None:
         try:
             if DNS not in packet:
                 return
@@ -99,9 +102,22 @@ class Monitor:
             if not name:
                 return
             with self._lock:
-                self._queries.append((time.time(), packet[IP].src, name))
+                if self._watched and source not in self._watched:
+                    return
+                self._queries.append((time.time(), source, name))
         except Exception:
             pass
+
+    def watch(self, hosts) -> None:
+        """Restrict counters to these addresses, so a busy WAN cannot grow them."""
+        hosts = set(hosts)
+        with self._lock:
+            self._watched = hosts
+            if hosts:
+                self._history = {key: value for key, value in self._history.items()
+                                 if key in hosts}
+                self._counts = {key: value for key, value in self._counts.items()
+                                if key in hosts}
 
     # -- sampling ----------------------------------------------------------
     def tick(self) -> None:

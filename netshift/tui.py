@@ -177,6 +177,7 @@ class App:
             return
         self._revision = self.scanner.revision
         alive = {d.ip for d in self.devices}
+        self.monitor.watch(alive)
         self.selected &= alive
         self.cursor = max(0, min(self.cursor, len(self.devices) - 1))
 

@@ -96,3 +96,18 @@ class HumanRate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Watching(unittest.TestCase):
+    def test_only_watched_addresses_are_counted(self):
+        monitor = Monitor("lo")
+        monitor.watch({CLIENT})
+        monitor._on_packet(query("example.com."))
+        self.assertIn(CLIENT, monitor._counts)
+        self.assertNotIn(GATEWAY, monitor._counts)
+
+    def test_queries_from_other_hosts_are_dropped(self):
+        monitor = Monitor("lo")
+        monitor.watch({CLIENT})
+        monitor._on_packet(query("example.com.", src="192.168.1.99"))
+        self.assertEqual(monitor.recent(), [])

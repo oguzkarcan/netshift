@@ -407,4 +407,5 @@ def heal(state_path: Path = STATE_PATH) -> str:
         set_forwarding(int(data["prev_forward"]))
 
     state_path.unlink(missing_ok=True)
-    return f"ARP entries restored for {len(targets)} device(s)."
+    layer = "ARP and IPv6" if gateway_ip6 else "ARP"
+    return f"{layer} entries restored for {len(targets)} device(s)."

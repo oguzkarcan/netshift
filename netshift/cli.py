@@ -156,7 +156,10 @@ def cmd_block(args: argparse.Namespace) -> None:
         print("\nRestoring...")
     finally:
         poisoner.stop()
-    print("ARP entries restored.")
+    if not args.no_ipv6 and poisoner.router_ip6:
+        print("ARP and IPv6 entries restored.")
+    else:
+        print("ARP entries restored.")
 
 
 def cmd_status(args: argparse.Namespace) -> None:

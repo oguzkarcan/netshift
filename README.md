@@ -3,48 +3,60 @@
 Cut a device's **internet** while leaving its **Wi-Fi** connected — from the terminal.
 
 ```
-  netshift · block · wlan0 192.168.1.20/24 · gw 192.168.1.1
-   [ ] 192.168.1.31  3c:22:fb:aa:bb:cc  Apple          iPhone       açık
- > [x] 192.168.1.42  9c:5c:8e:11:22:33  Samsung        tablet-TV    KESİK 03:41
-
- 6 cihaz · 1 kesik · 1 seçili | boşluk: seç  b: kes  r: geri aç  s: yenile  q: çık
+╭ netshift ───────────────────────────────────────────────────────────────────────────────── block ╮
+│ wlan0  192.168.1.20/255.255.255.0   gw 192.168.1.1                                     8 devices │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│      #  HOST                IP                                                                   │
+│▌[ ]  1  router.lan          192.168.1.1                                                ● gateway │
+│ [ ]  2  macbook             192.168.1.20                                          ● this machine │
+│ [ ]  3  iphone-ozzy         192.168.1.31                                                    ● up │
+│ [ ]  4  ipad                192.168.1.34                                                    ● up │
+│ [ ]  5  tv-salon            192.168.1.42                                             ● CUT 01:23 │
+│ [ ]  6  yazici              192.168.1.55                                                    ● up │
+│ [ ]  7  priz-01             192.168.1.61                                                    ● up │
+│ [ ]  8  kamera-giris        192.168.1.77                                                    ● up │
+│                                                                                                  │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+  space select · b cut · r restore · s rescan · m mode · ? help · q quit
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 No deauth, no router login, no app on the target device. The device keeps its Wi-Fi
 association and simply cannot reach the internet.
 
-> **Yetkili kullanım.** Bu araç yalnızca sahibi olduğunuz veya yazılı izniniz olan
-> ağlarda, kendi cihazlarınızda kullanılmak üzere yazıldı. Başkasının ağında, haberi
-> olmayan cihazlara uygulamak yetkisiz ağ müdahalesidir (bir tür hizmet engelleme) ve
-> birçok ülkede suçtur. Ders/lab demolarında kendi telefonunuzu, kendi tabletinizi
-> hedefleyin.
+> **Authorized use only.** This tool is written for networks you own or are explicitly
+> allowed to administer, and for devices you control. Running it on someone else's
+> network against devices whose owners have not agreed is unauthorised network
+> interference — a form of denial of service, and a crime in many jurisdictions.
+> In class, target your own phone, not the person next to you.
 
-## Nasıl çalışıyor
+## How it works
 
-Bir cihaz internete çıkarken önce "gateway'in MAC'i ne?" diye ARP ile sorar. `netshift`
-o cihaza gateway'in MAC'i yerine **ağda var olmayan** bir MAC adresi (`02:00:00:00:00:01`)
-bildirir. Cihazın paketleri yerel ağda ölür:
+Before a device can reach the internet it asks, over ARP, "which MAC address belongs to
+the gateway?". `netshift` answers that question on the gateway's behalf with a MAC
+address that does not exist on the LAN (`02:00:00:00:00:01`). The device's frames die at
+layer 2:
 
 ```
-   telefon  ──"gateway = 02:00:...:01"──►  (kimse cevap vermez)   ✗ internet
+   phone  ──"gateway is 02:00:...:01"──►  (nobody answers)   ✗ internet
       │
-      └── Wi-Fi association: bozulmaz, sinyal tam, IP aynı
+      └── Wi-Fi association: untouched, full signal, same IP
 ```
 
-Bu yüzden cihazın Wi-Fi'ı düşmez, "bağlı ama internet yok" durumuna geçer — tam olarak
-istenen davranış. Trafik sizin makinenizden **geçmez** (`block` modu), yani MITM
-pozisyonuna girmezsiniz ve `ip_forward` açmanız gerekmez.
+That is why the Wi-Fi icon stays full and the device ends up "connected, no internet" —
+exactly the behaviour you want. In `block` mode traffic does **not** pass through your
+machine, so you never take a man-in-the-middle position and `ip_forward` stays off.
 
-`mitm` modu ise eğitim amaçlı ikinci perde: her iki tarafa da zehirleme yapar,
-`ip_forward`'ı açar ve trafiği gerçekten bu makineden geçirir — "ARP spoofing neden
-tehlikeli" demosunda paketlerin akmaya devam ettiğini göstermek için.
+`mitm` mode is the second act of the demo: it poisons both directions, enables
+`ip_forward` and actually relays the traffic through this machine, so you can show *why*
+ARP spoofing is dangerous while packets keep flowing.
 
-## Kurulum
+## Install
 
 Linux (Arch/Omarchy):
 
 ```bash
-sudo pacman -S python-scapy          # veya aşağıdaki venv yolu
+sudo pacman -S python-scapy          # or let run.sh build a venv
 ```
 
 macOS:
@@ -53,100 +65,107 @@ macOS:
 brew install python3
 ```
 
-Her iki platformda, depo içinde:
+Then, from the repository:
 
 ```bash
-./run.sh              # ilk çalıştırmada .venv kurar ve scapy indirir
+./run.sh              # first run creates .venv and installs scapy
 sudo ./run.sh scan
 ```
 
-Kalıcı kurulum isterseniz:
+Or install it permanently:
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e .
 sudo .venv/bin/netshift scan
 ```
 
-`scapy` root ister (ham soket). `sudo` ile çalıştırmak zorunlu; `run.sh` bunu sizin
-için yapmaz, komutun başına `sudo` yazın.
+`scapy` needs raw sockets, so the tool must run as root. `run.sh` re-executes itself with
+`sudo` for you; it will not run privileged commands without your password.
 
-## Hızlı başlangıç
+## Quick start
 
 ```bash
-sudo ./run.sh scan                 # ağdaki cihazlar: IP, MAC, üretici, hostname
-sudo ./run.sh tui                  # etkileşimli liste
+sudo ./run.sh                      # the interface (no arguments launches the TUI)
+sudo ./run.sh scan                 # plain list: IP, MAC, vendor, hostname
 sudo ./run.sh block 192.168.1.42 --duration 5m
-sudo ./run.sh mitm 192.168.1.42    # trafik bu makineden geçsin (demo)
-sudo ./run.sh heal                 # çökme sonrası ARP kayıtlarını onar
+sudo ./run.sh mitm 192.168.1.42    # traffic relayed through this machine (demo)
+sudo ./run.sh heal                 # repair ARP entries after a crash
 ```
 
-TUI tuşları:
+The interface is entirely keyboard driven — no commands to type:
 
-| Tuş | İşlev |
+| Key | Action |
 | --- | --- |
-| `↑`/`↓` veya `k`/`j` | gezin |
-| `boşluk` | seç / seçimi kaldır |
-| `b` | seçili cihazların internetini kes |
-| `r` | hepsini geri aç |
-| `s` | yeniden tara (15 sn'de bir otomatik) |
-| `q` | çık (çıkarken her şeyi geri alır) |
+| `↑`/`↓` or `k`/`j` | move between devices |
+| `space` | select / deselect |
+| `b` | cut internet for the selected devices (confirmation dialog) |
+| `r` | restore every cut device |
+| `s` | rescan (also every 20 s in the background) |
+| `m` | switch mode: `block` ↔ `mitm` |
+| `enter` | device details |
+| `?` | help screen |
+| `q` | quit (restores everything on the way out) |
 
-Üretici adları için bir kez:
+Scans run in a background thread, so the cursor never freezes. On terminals 110+ columns
+wide a details panel for the focused device appears on the right; below 80 columns the
+table drops columns and stays readable down to roughly 60×18.
+
+Vendor names come from a one-off download:
 
 ```bash
-sudo ./run.sh oui-update           # IEEE OUI listesini ~/.cache/netshift/oui.csv içine indirir
+sudo ./run.sh oui-update           # IEEE OUI registry → ~/.cache/netshift/oui.csv
 ```
 
-## Komutlar
+## Commands
 
 ```
+netshift                            # the interface (same as `tui`)
+netshift tui    [--mode block|mitm] # interface, with an explicit mode
 netshift scan   [--iface X] [--gateway IP] [--no-names]
-netshift tui    [--mode block|mitm]
 netshift block  <IP...> [--mac MAC...] [--duration 15m] [--yes]
 netshift mitm   <IP...> [--mac MAC...] [--duration 15m]
 netshift heal
 netshift oui-update
 ```
 
-`--duration` bitince ARP kayıtları otomatik geri yüklenir. `Ctrl+C`, `SIGTERM` ve normal
-çıkış da aynı temizliği yapar; `kill -9` durumunda `netshift heal`.
+When `--duration` elapses the ARP entries are restored automatically. `Ctrl+C`, `SIGTERM`
+and a normal quit all perform the same cleanup; after a `kill -9`, run `netshift heal`.
 
-## Derste 5 dakikalık demo
+## A five-minute classroom demo
 
-1. `sudo ./run.sh tui` — cihaz listesi gelsin.
-2. Kendi telefonunuzu seçin (`boşluk`), sonra `b`.
-3. Telefonda: Wi-Fi simgesi **hâlâ dolu**, ama tarayıcıda sayfa açılmıyor. Uçak moduna
-   alıp geri açın: Wi-Fi yine bağlanır, internet yine yok. Fark burada görünür.
-4. `nft list ruleset` / router'da hiçbir kural yok, cihaza hiçbir şey kurulmadı — saldırı
-   tamamen L2'de, ARP protokolünün "kimlik doğrulaması yok" varsayımı üzerinden.
-5. `r` ile geri açın; telefon saniyeler içinde internete döner.
-6. İkinci perde: `sudo ./run.sh mitm <cihaz>` + `sudo tcpdump -i <iface> -n host <cihaz>`
-   ile düz HTTP/DNS trafiğinin okunabildiğini gösterin (HTTPS içeriği şifreli kalır, ama
-   hedef adresler ve DNS görünür).
-7. Kapanış: çözüm HTTPS değil, **ARP doğrulaması** — port güvenliği (Dynamic ARP
-   Inspection), statik ARP, 802.1X, ayrık VLAN'lar.
+1. `sudo ./run.sh` — let the device list fill in.
+2. Select your own phone (`space`), then press `b` and confirm.
+3. On the phone: the Wi-Fi icon is **still full**, but pages do not load. Toggle airplane
+   mode and back — Wi-Fi reconnects, the internet still does not. That contrast is the point.
+4. Show that nothing was installed on the phone and no firewall rule exists anywhere:
+   the attack lives entirely at layer 2, on ARP's assumption that nobody lies.
+5. Press `r`; the phone is back online within seconds.
+6. Second act: `sudo ./run.sh mitm <device>` plus
+   `sudo tcpdump -i <iface> -n host <device>` to show plain HTTP/DNS being readable
+   (HTTPS payload stays encrypted, but destinations and DNS do not).
+7. Close on the fix: ARP has no authentication, so the defence is **Dynamic ARP
+   Inspection**, static ARP entries, 802.1X and segmented VLANs — not HTTPS.
 
-## Sınırlar (dürüst liste)
+## Limits (the honest list)
 
-- **IPv6**: araç IPv4 ARP üzerinde çalışır. Ağda IPv6 varsa cihaz IPv6 ile internete
-  çıkmaya devam edebilir; o durumda `block` beklendiği gibi kesmez. IPv6 kapatın veya
-  RA/NDP tarafını ayrıca ele alın.
-- **İstemci izolasyonu açık ağlarda** (kafe/kurumsal guest Wi-Fi) cihazlar birbirinin
-  L2 trafiğini göremez; bu araç orada çalışmaz — zaten çalışmaması da doğrusu.
-- **Statik ARP** girişi olan cihazlar zehirlemeyi yok sayar.
-- Cihaz Wi-Fi'dan düşerse, uykuya girerse veya MAC değiştirirse liste güncellenmeli.
-- Aynı VLAN'daki yönetilen switch'lerde **Dynamic ARP Inspection** varsa zehirleme
-  engellenir (kurumsal ağlarda tipik).
-- `block` modu cihazın **yeni** bağlantılarını keser; mevcut TCP oturumları ARP önbelleği
-  tazelenene kadar birkaç saniye daha paket gönderebilir.
+- **IPv6**: the tool works on IPv4 ARP. If the network hands out IPv6, the device may keep
+  reaching the internet over it; `block` will look broken. Disable IPv6 for the demo or
+  handle router advertisements separately.
+- **Client isolation** (typical on café and corporate guest Wi-Fi) hides devices from each
+  other at layer 2; the tool will not work there — and it should not.
+- Devices with a **static ARP entry** ignore the poisoning.
+- If the device sleeps, leaves the network or randomises its MAC, rescan.
+- Managed switches with **Dynamic ARP Inspection** drop the forged replies.
+- `block` mode cuts **new** connections; an existing TCP session may keep sending for a
+  few seconds until the ARP cache is refreshed.
 
-## Neden router'dan yapmıyorsunuz?
+## Why not just use the router?
 
-Kendi ağınızın yöneticisiyseniz doğru yol router'dır: tek bir `nft`/MAC kuralı, siz
-orada değilken de çalışır ve denetlenebilir. `netshift` bilerek router'a dokunmaz;
-amacı **protokolün kendisini** göstermek — ARP'nin neden doğrulama gerektirdiğini
-anlatmanın en kısa yolu.
+If you administer the network, the router is the right place: one `nft` or MAC rule,
+it keeps working while your laptop is off, and it is auditable. `netshift` deliberately
+does not touch the router — its purpose is to demonstrate **the protocol itself**, which
+is the shortest way to explain why ARP needs verification.
 
-## Lisans
+## License
 
 MIT.

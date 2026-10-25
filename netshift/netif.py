@@ -57,15 +57,15 @@ def lookup(iface: str | None = None, gateway: str | None = None) -> NetInfo:
     else:
         ip = get_if_addr(iface) or str(src_ip)
         if not ip or ip == "0.0.0.0":
-            raise RuntimeError(f"{iface} uzerinde IPv4 adresi yok")
+            raise RuntimeError(f"no IPv4 address on {iface}")
 
     mac = get_if_hwaddr(iface)
     if not mac or mac == "00:00:00:00:00:00":
-        raise RuntimeError(f"{iface} icin MAC adresi okunamadi")
+        raise RuntimeError(f"could not read the MAC address of {iface}")
 
     gw = gateway or str(default_gw or "")
     if not gw:
-        raise RuntimeError("varsayilan gateway bulunamadi, --gateway ile belirtin")
+        raise RuntimeError("no default gateway found, pass --gateway")
 
     netmask = netmask_for(iface)
     cidr = str(ipaddress.IPv4Network(f"{ip}/{netmask}", strict=False))

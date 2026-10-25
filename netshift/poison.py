@@ -92,7 +92,7 @@ class Poisoner:
     # -- target management -------------------------------------------------
     def add(self, ip: str, mac: str) -> None:
         if ip == self.net.gateway:
-            raise ValueError("gateway hedef alinamaz")
+            raise ValueError("the gateway cannot be a target")
         self.targets[ip] = Target(ip=ip, mac=mac.lower())
 
     def remove(self, ip: str) -> None:
@@ -111,7 +111,7 @@ class Poisoner:
             return
         self.gw_mac = getmacbyip(self.net.gateway)
         if not self.gw_mac:
-            raise RuntimeError("gateway MAC adresi ogrenilemedi (ARP yaniti yok)")
+            raise RuntimeError("could not learn the gateway MAC (no ARP reply)")
 
         if self.mode == "mitm":
             self._prev_forward = get_forwarding()
@@ -221,7 +221,7 @@ class Poisoner:
 def heal(state_path: Path = STATE_PATH) -> str:
     """Repair the network after an unclean exit. Returns a human summary."""
     if not state_path.exists():
-        return "Onarilacak bir kayit yok."
+        return "Nothing to heal."
     data = json.loads(state_path.read_text(encoding="utf-8"))
     gateway = data.get("gateway")
     gateway_mac = data.get("gateway_mac") or getmacbyip(gateway)
@@ -229,7 +229,7 @@ def heal(state_path: Path = STATE_PATH) -> str:
     targets = [Target(**t) for t in data.get("targets", [])]
 
     if not gateway_mac:
-        return "Gateway MAC bulunamadi; cihazlar kisa sure icinde kendini duzeltir."
+        return "Gateway MAC not found; the devices recover on their own shortly."
 
     frames = []
     for target in targets:
@@ -257,4 +257,4 @@ def heal(state_path: Path = STATE_PATH) -> str:
         set_forwarding(int(data["prev_forward"]))
 
     state_path.unlink(missing_ok=True)
-    return f"{len(targets)} cihaz icin ARP kaydi geri yuklendi."
+    return f"ARP entries restored for {len(targets)} device(s)."

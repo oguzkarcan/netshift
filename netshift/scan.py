@@ -17,6 +17,12 @@ class Device:
     hostname: str = ""
     is_gateway: bool = False
     is_self: bool = False
+    alias: str = ""
+
+    @property
+    def name(self) -> str:
+        """What the UI should call this device: alias, then hostname, then vendor."""
+        return self.alias or self.hostname
 
 
 def arp_scan(cidr: str, iface: str, timeout: float = 3.0) -> list[Device]:
@@ -41,6 +47,9 @@ def add_hostnames(devices: list[Device], iface_ip: str, timeout: float = 1.4) ->
 
 
 def annotate(devices: list[Device], gateway: str, my_ip: str) -> None:
+    from . import aliases
+
     for dev in devices:
         dev.is_gateway = dev.ip == gateway
         dev.is_self = dev.ip == my_ip
+    aliases.apply(devices)

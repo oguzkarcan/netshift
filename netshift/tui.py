@@ -13,7 +13,7 @@ import signal
 import threading
 import time
 
-from . import scan
+from . import aliases, notify, scan, wol
 from .netif import NetInfo
 from .poison import Poisoner
 
@@ -35,6 +35,9 @@ HELP_LINES = [
     ("  ↑ ↓ / j k", "move between devices"),
     ("  space", "select / deselect a device"),
     ("  b", "cut internet for the selected devices"),
+    ("  n", "rename the focused device"),
+    ("  t", "auto-restore timer (off/1/5/15/30/60 min)"),
+    ("  w", "wake the focused device (Wake-on-LAN)"),
     ("  r", "restore every cut device"),
     ("  s", "rescan the network"),
     ("  m", "switch mode: block ↔ mitm"),
@@ -132,12 +135,14 @@ class App:
         self.cursor = 0
         self.selected: set[str] = set()
         self.cut_since: dict[str, float] = {}
-        self.screen = "main"          # main | confirm | help | details
+        self.screen = "main"          # main | confirm | help | details | timer
+        self.timer_seconds = 0        # default for the next cut; 0 = no timer
         self.toast = ""
         self.toast_until = 0.0
         self.running = True
         self._revision = -1
         self._frame = 0
+        self.pal: Palette | None = None
 
     # -- state helpers -----------------------------------------------------
     @property
@@ -180,11 +185,12 @@ class App:
     def apply_cut(self) -> None:
         self.screen = "main"
         added: list[str] = []
+        deadline = time.time() + self.timer_seconds if self.timer_seconds else None
         for dev in self.devices:
             if dev.ip in self.selected and dev.ip not in self.poisoner.targets:
                 if dev.is_gateway:
                     continue
-                self.poisoner.add(dev.ip, dev.mac)
+                self.poisoner.add(dev.ip, dev.mac, deadline=deadline)
                 self.cut_since[dev.ip] = time.time()
                 added.append(dev.ip)
         if not added:
@@ -200,7 +206,57 @@ class App:
             return
         self.selected.clear()
         noun = "device" if len(added) == 1 else "devices"
-        self.notify(f"{len(added)} {noun} cut — Wi-Fi stays connected.", 6)
+        extra = f" (auto-restore in {self._minutes(self.timer_seconds)})" if self.timer_seconds else ""
+        self.notify(f"{len(added)} {noun} cut — Wi-Fi stays connected{extra}.", 6)
+        notify.desktop("netshift", f"{len(added)} {noun} cut — Wi-Fi stays connected{extra}.")
+
+    @staticmethod
+    def _minutes(seconds: int) -> str:
+        return "1 minute" if seconds == 60 else f"{seconds // 60} minutes"
+
+    # -- timers ------------------------------------------------------------
+    def apply_timer(self, seconds: int) -> None:
+        """Set the default timer and apply it to any cut device in scope."""
+        self.timer_seconds = seconds
+        target_ips = set(self.selected)
+        focused = self.focused()
+        if not target_ips and focused is not None:
+            target_ips = {focused.ip}
+        changed = 0
+        deadline = time.time() + seconds if seconds else None
+        for ip in target_ips:
+            if self.poisoner.set_deadline(ip, deadline):
+                changed += 1
+        if seconds:
+            text = f"Timer: {self._minutes(seconds)} after the next cut."
+            if changed:
+                text = f"Timer set to {self._minutes(seconds)} for {changed} cut device(s)."
+        else:
+            text = "Timer cleared." if changed else "Timer off."
+        self.notify(text, 5)
+        self.screen = "main"
+
+    def expire_timers(self) -> None:
+        now = time.time()
+        expired = [
+            ip for ip, target in list(self.poisoner.targets.items())
+            if target.deadline is not None and target.deadline <= now
+        ]
+        if not expired:
+            return
+        for ip in expired:
+            self.cut_since.pop(ip, None)
+        threading.Thread(target=self._restore_expired, args=(expired,), daemon=True).start()
+        noun = "device" if len(expired) == 1 else "devices"
+        self.notify(f"Timer: restoring {len(expired)} {noun}.", 5)
+        notify.desktop("netshift", f"Timer finished — internet restored for {len(expired)} {noun}.")
+
+    def _restore_expired(self, ips: list[str]) -> None:
+        for ip in ips:
+            try:
+                self.poisoner.restore_target(ip)
+            except Exception:
+                self.poisoner.remove(ip)
 
     def restore_all(self) -> None:
         count = len(self.poisoner.targets)
@@ -212,6 +268,20 @@ class App:
         self.cut_since.clear()
         noun = "device" if count == 1 else "devices"
         self.notify(f"ARP entries restored for {count} {noun}.", 5)
+        notify.desktop("netshift", f"Internet restored for {count} {noun}.")
+
+    def wake_focused(self) -> None:
+        dev = self.focused()
+        if dev is None:
+            return
+        name = dev.alias or dev.hostname or dev.ip
+        try:
+            wol.wake(dev.mac, self.net.iface,
+                     wol.broadcast_address(self.net.ip, self.net.netmask))
+        except Exception as exc:
+            self.notify(f"Wake failed: {exc}", 5)
+            return
+        self.notify(f"Magic packet sent to {name}.", 4)
 
     def toggle_mode(self) -> None:
         if self.poisoner.active:
@@ -320,10 +390,10 @@ class App:
 
             if wide:
                 vendor = (dev.vendor or "-")[:18]
-                host = (dev.hostname or "-")[:18]
+                host = (dev.alias or dev.hostname or "-")[:18]
                 body = f"{mark}{box} {index + 1:>2}  {host:<19}{dev.ip:<16}{dev.mac:<18}{vendor:<20}"
             elif medium:
-                host = (dev.hostname or dev.vendor or "-")[:18]
+                host = (dev.alias or dev.hostname or dev.vendor or "-")[:18]
                 body = f"{mark}{box} {index + 1:>2}  {host:<20}{dev.ip:<16}"
             else:
                 body = f"{mark}{box} {index + 1:>2}  {dev.ip:<16}"
@@ -346,6 +416,10 @@ class App:
 
     def state_text(self, dev: scan.Device, cut: bool) -> str:
         if cut:
+            target = self.poisoner.targets.get(dev.ip)
+            if target is not None and target.deadline is not None:
+                left = max(0, int(target.deadline - time.time()))
+                return f"CUT {left // 60:02d}:{left % 60:02d}"
             started = self.cut_since.get(dev.ip)
             if started:
                 seconds = int(time.time() - started)
@@ -356,6 +430,15 @@ class App:
         if dev.is_self:
             return "this machine"
         return "up"
+
+    def timer_text(self, dev: scan.Device) -> str:
+        target = self.poisoner.targets.get(dev.ip)
+        if target is None:
+            return "-"
+        if target.deadline is None:
+            return "none"
+        left = max(0, int(target.deadline - time.time()))
+        return f"{left // 60}m {left % 60:02d}s left"
 
     def draw_empty(self, win: curses.window, pal: Palette, top: int, bottom: int) -> None:
         message = "Scanning…" if self.scanner.busy else "No devices found — press s to rescan"
@@ -368,7 +451,7 @@ class App:
             text = " " + self.toast
             attr = pal["accent"] | curses.A_BOLD
         else:
-            text = " space select · b cut · r restore · s rescan · m mode · ? help · q quit "
+            text = " space select · b cut · n name · t timer · r restore · s rescan · ? help · q quit "
             attr = pal["dim"]
         self.put(win, height - 2, 1, text, attr, width - 2)
 
@@ -386,11 +469,13 @@ class App:
 
         label_w = 10
         lines = [
+            ("Alias", dev.alias or "-"),
             ("Host", dev.hostname or "(unknown)"),
             ("IP", dev.ip),
             ("MAC", dev.mac),
             ("Vendor", dev.vendor or "-"),
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
+            ("Timer", self.timer_text(dev)),
             ("Selected", "yes" if dev.ip in self.selected else "no"),
         ]
         for offset, (label, value) in enumerate(lines, start=2):
@@ -415,6 +500,9 @@ class App:
 
         for y in range(top, min(top + panel_h, height)):
             self.put(win, y, left, " " * panel_w, pal["title"])
+        for y in range(top + 1, min(top + panel_h - 1, height - 1)):
+            self.put(win, y, left, G["v"], pal["title"])
+            self.put(win, y, left + panel_w - 1, G["v"], pal["title"])
         self.put(win, top, left, G["tl"] + G["h"] * (panel_w - 2) + G["tr"], pal["title"])
         self.put(win, top, left + 1, f"{G['h']} {title} ", pal["title"] | curses.A_BOLD, panel_w - 2)
         self.put(win, top + panel_h - 1, left, G["bl"] + G["h"] * (panel_w - 2) + G["br"], pal["title"])
@@ -427,7 +515,7 @@ class App:
         noun = "device" if len(targets) == 1 else "devices"
         lines: list[tuple[str, int]] = [(f"{len(targets)} {noun} will lose internet access:", pal["text"]), ("", 0)]
         for dev in targets[:5]:
-            name = dev.hostname or dev.ip
+            name = dev.alias or dev.hostname or dev.ip
             lines.append((f"  {G['dot']} {name}  ({dev.ip})", pal["cut"]))
         if len(targets) > 5:
             lines.append((f"  … and {len(targets) - 5} more", pal["text"]))
@@ -448,16 +536,117 @@ class App:
             self.screen = "main"
             return
         rows = [
+            ("Alias", dev.alias or "-"),
             ("Host", dev.hostname or "(unknown)"),
             ("IP", dev.ip),
             ("MAC", dev.mac),
             ("Vendor", dev.vendor or "-"),
             ("State", self.state_text(dev, dev.ip in self.poisoner.targets)),
+            ("Timer", self.timer_text(dev)),
             ("Gateway", "yes" if dev.is_gateway else "no"),
             ("This machine", "yes" if dev.is_self else "no"),
         ]
         lines = [(f"  {label:<14}{value}", pal["text"]) for label, value in rows]
         self.draw_modal(win, pal, "device details", lines, "[Esc] close", width=62)
+
+    # -- rename and timers -------------------------------------------------
+    def prompt_alias(self, win: curses.window, pal: Palette, dev: scan.Device) -> str | None:
+        """Single-line editor: Enter saves, Esc cancels, empty clears."""
+        height, cols = win.getmaxyx()
+        panel_w = min(66, cols - 4)
+        panel_h = 8
+        top = max(1, (height - panel_h) // 2)
+        left = max(1, (cols - panel_w) // 2)
+        buffer = dev.alias
+        subtitle = (dev.hostname or dev.ip)[: panel_w - 4]
+        footer = "Enter save · Esc cancel · empty clears"
+        field_w = panel_w - 13
+
+        curses.curs_set(1)
+        win.nodelay(False)
+        try:
+            while True:
+                for y in range(top, min(top + panel_h, height - 1)):
+                    self.put(win, y, 1, " " * (cols - 2), 0, cols - 2)
+                for y in range(top, min(top + panel_h, height)):
+                    self.put(win, y, left, " " * panel_w, pal["title"])
+                for y in range(top + 1, min(top + panel_h - 1, height - 1)):
+                    self.put(win, y, left, G["v"], pal["title"])
+                    self.put(win, y, left + panel_w - 1, G["v"], pal["title"])
+                self.put(win, top, left, G["tl"] + G["h"] * (panel_w - 2) + G["tr"], pal["title"])
+                self.put(win, top, left + 1, f"{G['h']} rename ", pal["title"] | curses.A_BOLD, panel_w - 2)
+                self.put(win, top + panel_h - 1, left,
+                         G["bl"] + G["h"] * (panel_w - 2) + G["br"], pal["title"])
+                self.put(win, top + 2, left + 2, subtitle, pal["dim"], panel_w - 4)
+                self.put(win, top + 4, left + 2, "Name", pal["text"])
+                shown = buffer[-field_w:] if len(buffer) > field_w else buffer
+                self.put(win, top + 4, left + 10, shown.ljust(field_w), pal["text"], field_w)
+                self.put(win, top + 6, left + 2, footer[: panel_w - 4], pal["accent"], panel_w - 4)
+                win.move(top + 4, left + 10 + len(shown))
+                win.refresh()
+
+                key = win.getch()
+                if key in (10, 13, curses.KEY_ENTER):
+                    return aliases.clean_alias(buffer)
+                if key == 27:
+                    return None
+                if key in (curses.KEY_BACKSPACE, 8, 127):
+                    buffer = buffer[:-1]
+                elif key == curses.KEY_DC:
+                    buffer = ""
+                elif 32 <= key <= 0x10FFFF and len(buffer) < aliases.MAX_LENGTH:
+                    buffer += chr(key)
+        finally:
+            win.nodelay(True)
+            try:
+                curses.curs_set(0)
+            except curses.error:
+                pass
+
+    def rename(self, win: curses.window, pal: Palette | None) -> None:
+        dev = self.focused()
+        if dev is None or pal is None:
+            return
+        value = self.prompt_alias(win, pal, dev)
+        if value is None:
+            return
+        dev.alias = aliases.set_alias(dev.mac, value)
+        if dev.alias:
+            self.notify(f"Renamed to “{dev.alias}”.", 4)
+        else:
+            self.notify("Alias cleared.", 4)
+
+    TIMER_CHOICES = [(ord("1"), 60), (ord("2"), 300), (ord("3"), 900),
+                     (ord("4"), 1800), (ord("h"), 3600)]
+
+    def draw_timer(self, win: curses.window, pal: Palette) -> None:
+        current = self._minutes(self.timer_seconds) if self.timer_seconds else "off"
+        lines = [
+            ("  How long should a cut last?", pal["text"]),
+            ("", 0),
+            ("   1   1 minute", pal["text"]),
+            ("   2   5 minutes", pal["text"]),
+            ("   3  15 minutes", pal["text"]),
+            ("   4  30 minutes", pal["text"]),
+            ("   h   1 hour", pal["text"]),
+            ("   o   no timer (until r)", pal["text"]),
+            ("", 0),
+            (f"  Current default: {current}", pal["dim"]),
+        ]
+        self.draw_modal(win, pal, "auto-restore timer", lines,
+                        "[1-4/h/o] choose · [Esc] cancel", width=52)
+
+    def timer_choice(self, key: int) -> None:
+        if key in (27, ord("q")):
+            self.screen = "main"
+            return
+        if key == ord("o"):
+            self.apply_timer(0)
+            return
+        for code, seconds in self.TIMER_CHOICES:
+            if key == code:
+                self.apply_timer(seconds)
+                return
 
     # -- main loop ---------------------------------------------------------
     def draw(self, win: curses.window, pal: Palette) -> None:
@@ -477,14 +666,19 @@ class App:
             self.draw_help(win, pal)
         elif self.screen == "details":
             self.draw_details_modal(win, pal)
+        elif self.screen == "timer":
+            self.draw_timer(win, pal)
         win.refresh()
 
-    def handle(self, key: int) -> None:
+    def handle(self, key: int, win: curses.window | None = None) -> None:
         if self.screen == "confirm":
             if key in (10, 13, curses.KEY_ENTER, ord("y")):
                 self.apply_cut()
             elif key in (27, ord("n")):
                 self.screen = "main"
+            return
+        if self.screen == "timer":
+            self.timer_choice(key)
             return
         if self.screen in ("help", "details"):
             if key in (27, ord("q"), ord("?"), 10, 13, curses.KEY_ENTER):
@@ -499,6 +693,12 @@ class App:
             self.toggle()
         elif key in (ord("b"), ord("x")):
             self.ask_cut()
+        elif key == ord("n") and win is not None:
+            self.rename(win, self.pal)
+        elif key == ord("t"):
+            self.screen = "timer"
+        elif key == ord("w"):
+            self.wake_focused()
         elif key == ord("r"):
             self.restore_all()
         elif key == ord("s"):
@@ -520,6 +720,7 @@ class App:
         win.nodelay(True)
         win.keypad(True)
         pal = Palette()
+        self.pal = pal
 
         def on_signal(_signum, _frame):
             self.running = False
@@ -532,9 +733,13 @@ class App:
 
         self.scanner.start()
         last_scan = time.time()
+        last_timer_check = 0.0
 
         while self.running:
             self.sync_scan()
+            if time.time() - last_timer_check > 0.5:
+                self.expire_timers()
+                last_timer_check = time.time()
 
             if not self.scanner.busy and time.time() - last_scan > 20:
                 self.scanner.start()
@@ -548,7 +753,7 @@ class App:
             except curses.error:
                 key = -1
             if key != -1:
-                self.handle(key)
+                self.handle(key, win)
 
             self._frame += 1
             time.sleep(0.08)

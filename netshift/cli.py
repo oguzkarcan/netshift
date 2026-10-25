@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import re
 import signal
 import sys
 import time
 
-from . import __version__, oui, scan
+from . import __version__, aliases, oui, scan, wol
 from .netif import NetInfo, lookup
-from .poison import Poisoner, heal
+from .poison import STATE_PATH, Poisoner, heal
 
 LAB_NOTICE = """\
 netshift is meant for networks you own or are explicitly allowed to administer.
@@ -112,7 +114,7 @@ def cmd_scan(args: argparse.Namespace) -> None:
             flags.append("gateway")
         if dev.is_self:
             flags.append("this machine")
-        name = dev.hostname[:26]
+        name = (dev.alias or dev.hostname)[:26]
         marks = f"  [{', '.join(flags)}]" if flags else ""
         vendor = (dev.vendor or "-")[:22]
         print(f"{dev.ip:<16}{dev.mac:<19}{vendor:<24}{name}{marks}")
@@ -154,6 +156,98 @@ def cmd_block(args: argparse.Namespace) -> None:
     finally:
         poisoner.stop()
     print("ARP entries restored.")
+
+
+def cmd_status(args: argparse.Namespace) -> None:
+    """Report a running or leftover session. Deliberately does not need root."""
+    if not STATE_PATH.exists():
+        print("No active netshift session.")
+        return
+    try:
+        data = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        sys.exit(f"Error: cannot read {STATE_PATH}.")
+
+    pid = data.get("pid")
+    alive = False
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:      # exists, owned by root
+            alive = True
+
+    print(f"Interface : {data.get('iface')}   gateway {data.get('gateway')}   mode {data.get('mode')}")
+    state = "running" if alive else "not running (stale state file)"
+    print(f"Process   : {state}" + (f"   pid {pid}" if pid else ""))
+    targets = data.get("targets", [])
+    print(f"Targets   : {len(targets)}")
+    now = time.time()
+    for target in targets:
+        mac = target.get("mac", "")
+        name = aliases.get(mac) or "-"
+        deadline = target.get("deadline")
+        if deadline:
+            left = max(0, int(float(deadline) - now))
+            when = f"auto-restore in {left // 60:02d}:{left % 60:02d}"
+        else:
+            when = "until stopped"
+        print(f"  {target.get('ip', ''):<16}{mac:<19}{name:<22}{when}")
+    if not alive:
+        print("\nThis state is stale; run: sudo netshift heal")
+
+
+def _looks_like_mac(text: str) -> bool:
+    return bool(re.fullmatch(r"(?:[0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}", text))
+
+
+def cmd_alias(args: argparse.Namespace) -> None:
+    """List, set or clear the names shown instead of discovered hostnames."""
+    if args.target is None:
+        mapping = aliases.load()
+        if not mapping:
+            print('No aliases yet. Example: netshift alias 192.168.1.42 "Living room TV"')
+            return
+        for mac, name in sorted(mapping.items()):
+            print(f"{mac}  {name}")
+        return
+
+    if _looks_like_mac(args.target):
+        mac = args.target.lower()
+    else:
+        _need_root()
+        from scapy.all import getmacbyip
+
+        mac = getmacbyip(args.target)
+        if not mac:
+            sys.exit(f"Error: no MAC address for {args.target} (is the device on?).")
+        mac = mac.lower()
+
+    name = "" if args.clear else " ".join(args.name)
+    value = aliases.set_alias(mac, name)
+    if value:
+        print(f"{mac}  →  “{value}”")
+    else:
+        print(f"Alias cleared for {mac}.")
+
+
+def cmd_wake(args: argparse.Namespace) -> None:
+    """Send a Wake-on-LAN magic packet to an IP or a MAC."""
+    net = lookup(args.iface, args.gateway)
+    if _looks_like_mac(args.target):
+        mac = args.target.lower()
+    else:
+        _need_root()
+        from scapy.all import getmacbyip
+
+        mac = getmacbyip(args.target)
+        if not mac:
+            sys.exit(f"Error: no MAC address for {args.target} (is the device on?).")
+        mac = mac.lower()
+    wol.wake(mac, net.iface, wol.broadcast_address(net.ip, net.netmask))
+    print(f"Magic packet sent to {mac} via {net.iface}.")
 
 
 def cmd_heal(args: argparse.Namespace) -> None:
@@ -212,6 +306,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_cut_args(p_mitm)
     p_mitm.set_defaults(func=cmd_block, mode="mitm")
+
+    p_status = sub.add_parser("status", help="show the active session and its timers")
+    p_status.set_defaults(func=cmd_status)
+
+    p_alias = sub.add_parser("alias", help="give a device a name of your own (per MAC)")
+    p_alias.add_argument("target", nargs="?", help="IP address, or a MAC address")
+    p_alias.add_argument("name", nargs="*", help="the new name; omit to list aliases")
+    p_alias.add_argument("--clear", action="store_true", help="remove the alias")
+    p_alias.set_defaults(func=cmd_alias)
+
+    p_wake = sub.add_parser("wake", parents=[common], help="wake a sleeping device (Wake-on-LAN)")
+    p_wake.add_argument("target", help="IP address, or a MAC address")
+    p_wake.set_defaults(func=cmd_wake)
 
     p_heal = sub.add_parser("heal", help="repair ARP entries left behind by a crashed session")
     p_heal.set_defaults(func=cmd_heal)

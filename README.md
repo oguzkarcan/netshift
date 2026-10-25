@@ -89,6 +89,9 @@ sudo ./run.sh                      # the interface (no arguments launches the TU
 sudo ./run.sh scan                 # plain list: IP, MAC, vendor, hostname
 sudo ./run.sh block 192.168.1.42 --duration 5m
 sudo ./run.sh mitm 192.168.1.42    # traffic relayed through this machine (demo)
+sudo ./run.sh status               # active session, timers, stale state
+sudo ./run.sh alias 192.168.1.42 "Living room TV"
+sudo ./run.sh wake 192.168.1.42    # Wake-on-LAN
 sudo ./run.sh heal                 # repair ARP entries after a crash
 ```
 
@@ -99,6 +102,9 @@ The interface is entirely keyboard driven — no commands to type:
 | `↑`/`↓` or `k`/`j` | move between devices |
 | `space` | select / deselect |
 | `b` | cut internet for the selected devices (confirmation dialog) |
+| `n` | rename the focused device (stored per MAC) |
+| `t` | auto-restore timer: off / 1 / 5 / 15 / 30 / 60 min |
+| `w` | wake the focused device (Wake-on-LAN) |
 | `r` | restore every cut device |
 | `s` | rescan (also every 20 s in the background) |
 | `m` | switch mode: `block` ↔ `mitm` |
@@ -138,12 +144,46 @@ address changes and show up instantly on later scans. A device that answers none
 sources stays unnamed — the table then falls back to the vendor name. `scan --no-names`
 skips resolution entirely when you only want IPs and MACs.
 
+### Names, timers and status
+
+`n` renames the focused device. The name is stored per MAC in
+`~/.config/netshift/aliases.json`, wins over anything discovered, and works for devices
+that never announce a hostname:
+
+```bash
+netshift alias 192.168.1.42 "Living room TV"   # needs root: it resolves the IP via ARP
+netshift alias 54:ef:44:90:a3:3e "Aqara hub"   # a MAC works without root
+netshift alias 192.168.1.42 --clear
+netshift alias                                 # list every alias
+```
+
+`t` arms an auto-restore timer (off / 1 / 5 / 15 / 30 / 60 minutes). It applies to the
+selected devices if there are any, otherwise to the focused one, and becomes the default
+for the next cut. The CUT column then counts **down** instead of up, and the device is
+restored when it reaches zero with the same frames as `r`.
+
+`netshift status` reads the state file — no root needed — and shows the interface, whether
+the process is still alive, and every target with its remaining time. After a `kill -9` it
+spots the stale file and points at `netshift heal`.
+
+Cuts, restores and finished timers also raise a desktop notification when `notify-send`
+(Linux) or `osascript` (macOS) is reachable. Set `NETSHIFT_NOTIFY=0` to silence them.
+
+### Wake-on-LAN
+
+`w` in the interface, or `netshift wake <IP|MAC>`, broadcasts a standard magic packet, so
+a sleeping TV or PC can be woken before you cut it — or after, to show that the link comes
+back.
+
 ## Commands
 
 ```
 netshift                            # the interface (same as `tui`)
 netshift tui    [--mode block|mitm] # interface, with an explicit mode
 netshift scan   [--iface X] [--gateway IP] [--no-names]
+netshift status                     # active session, timers, stale state
+netshift alias  [IP|MAC] [name] [--clear]
+netshift wake   <IP|MAC>
 netshift block  <IP...> [--mac MAC...] [--duration 15m] [--yes]
 netshift mitm   <IP...> [--mac MAC...] [--duration 15m]
 netshift heal

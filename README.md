@@ -17,7 +17,7 @@ Cut a device's **internet** while leaving its **Wi-Fi** connected — from the t
 │ [ ]  8  kamera-giris        192.168.1.77                                                    ● up │
 │                                                                                                  │
 ├──────────────────────────────────────────────────────────────────────────────────────────────────┤
-  space select · b cut · r restore · s rescan · m mode · ? help · q quit
+  space select · b cut · n name · t timer · d dns · r restore · s rescan · ? help · q quit
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
